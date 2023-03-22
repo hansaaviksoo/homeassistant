@@ -1,0 +1,83 @@
+sensor:
+  - platform: rest
+    resource: https://dashboard.elering.ee/api/nps/price/EE/current
+    method: GET
+    headers:
+      accept: "*/*"
+    name: Current Energy Price
+    value_template: "{{ value_json.data[0].price }}"
+    scan_interval: 120
+  
+  - platform: rest
+    name: Daily Energy Price
+    resource_template: https://dashboard.elering.ee/api/nps/price?start={{ now().strftime('%Y-%m-%d') }}T00%3A00%3A00.999Z&end={{ (now() + timedelta(days = 2)).strftime('%Y-%m-%d') }}T00%3A59%3A59.999Z
+    method: GET
+    headers:
+      accept: "*/*"
+    json_attributes_path: $.data
+    json_attributes:
+      - ee
+    value_template: "{{ now().strftime('%Y-%m-%d %H:59:59.999Z') }}"
+    scan_interval: 3600
+  - platform: template
+    sensors:
+      cheapest_hours_energy:
+        device_class: timestamp
+        friendly_name: Cheapest consecutive 2 hours
+        value_template: >
+          {% set ns = namespace(lowest_price=None, lowest_start=None, lowest_end=None, current_start=None, current_sum=0, current_count=0) %}
+          {% set algus = None %}
+          
+          {% set now_timestamp = now().timestamp() %}
+          
+          {% for state in states.sensor.daily_energy_price.attributes.ee %}
+            {% set current_timestamp = state.timestamp | int %}
+            {% set current_price = state.price | float %}
+          
+            {% if current_timestamp > now_timestamp %}
+              {% if ns.current_start is none %}
+                {% set ns.current_start = current_timestamp %}
+              {% endif %}  
+  
+              {% if current_timestamp - ns.current_start <= 3600 %}
+                {% set ns.current_sum = ns.current_sum + current_price %}
+                {% set ns.current_count = ns.current_count + 1 %}
+                
+                {% if ns.current_count == 2 %}
+                  {% if ns.lowest_price is none or ns.current_sum < ns.lowest_price %}
+                    {% set ns.lowest_price = ns.current_sum %}
+                    {% set ns.lowest_start = ns.current_start %}
+                    {% set ns.lowest_end = current_timestamp %}
+                  {% endif %}
+                  {% set ns.current_sum = current_price %}
+                  {% set ns.current_count = 1 %}
+                  {% set ns.current_start = current_timestamp %}
+                {% endif %}
+          
+              {% else %}
+                {% if ns.current_count == 1 %}
+                  {% set ns.current_sum = ns.current_sum + current_price %}
+                  {% set ns.current_count = 2 %}
+                  
+                  {% if ns.lowest_price is none or ns.current_sum < ns.lowest_price %}
+                    {% set ns.lowest_price = ns.current_sum %}
+                    {% set ns.lowest_start = ns.current_start %}
+                    {% set ns.lowest_end = current_timestamp %}
+                  {% endif %}
+          
+                  {% set ns.current_sum = 0 %}
+                  {% set ns.current_count = 0 %}
+                  {% set ns.current_start = None %}
+                {% else %}
+                  {% set ns.current_sum = current_price %}
+                  {% set ns.current_count = 1 %}
+                  {% set ns.current_start = current_timestamp %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.lowest_start is none %}
+          {% else %}
+            {% set dt = strptime(ns.lowest_start | timestamp_custom('%Y-%m-%d %H:00:00'), "%Y-%m-%d %H:%M:%S") %}
+            {{ as_timestamp(dt) | timestamp_local }}
+          {% endif %}
